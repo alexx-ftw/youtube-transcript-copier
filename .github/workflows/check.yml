@@ -17,3 +17,15 @@ jobs:
           node-version: '22'
       - name: Check syntax, versions, update URLs and generated files
         run: npm test
+  ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install isolated browser-test dependencies
+        run: |
+          python3 -m venv /tmp/ytcopy-ui-venv
+          /tmp/ytcopy-ui-venv/bin/python -m pip install -r test/requirements-ui.txt
+          /tmp/ytcopy-ui-venv/bin/python -m playwright install --with-deps chromium
+      - name: Check toolbar, combined panels and copy flows in Chromium
+        run: /tmp/ytcopy-ui-venv/bin/python -m unittest discover -s test -p '*_ui.py' -v

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube - Copiar transcripción completa
 // @namespace    eros.youtube.transcript
-// @version      1.1.1
+// @version      1.2.0
 // @description  Copia, revisa y guarda la transcripción. Panel moderno/clásico, carga progresiva y avisos de integridad.
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -20,7 +20,9 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.1.1';
+  const VERSION = '1.2.0';
+  const PANEL_ROOT = 'ytd-engagement-panel-section-list-renderer';
+  const ACTION_HOST = 'ytd-watch-metadata #actions-inner, #actions.ytd-watch-metadata #actions-inner';
   const PANEL = [
     'ytd-engagement-panel-section-list-renderer[target-id="PAmodern_transcript_view"]',
     'ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-searchable-transcript"]',
@@ -81,6 +83,71 @@
     return element.getClientRects().length > 0 && style.display !== 'none' && style.visibility !== 'hidden';
   }
 
+  const controlLabel = el => clean(el?.getAttribute('aria-label') || el?.textContent)
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const isTranscriptControl = el => /^(?:(?:mostrar|ver|show|view) )?(?:transcripcion|transcript|transcription)(?: completa)?$/.test(controlLabel(el));
+  const transcriptTab = panel => [...panel.querySelectorAll('[role="tab"]')].find(isTranscriptControl);
+  const transcriptContent = `${ROW}, ytd-transcript-renderer, ytd-transcript-search-panel-renderer, ` +
+    '[data-target-id*="transcript"], [panel-target-id*="transcript"]';
+
+  function isTranscriptPanel(panel) {
+    return panel.matches(PANEL_ROOT) &&
+      (panel.matches(PANEL) || !!panel.querySelector(transcriptContent) || !!transcriptTab(panel));
+  }
+
+  function transcriptPanels() {
+    const id = new URL(location.href).searchParams.get('v');
+    return [...document.querySelectorAll(PANEL_ROOT)].filter(panel => {
+      const owner = panel.closest('ytd-watch-flexy[video-id]');
+      return (!owner || !owner.getAttribute('video-id') || owner.getAttribute('video-id') === id) && isTranscriptPanel(panel);
+    });
+  }
+
+  function panelVisible(panel) {
+    return visible(panel) && panel.getAttribute('visibility') !== 'ENGAGEMENT_PANEL_VISIBILITY_HIDDEN';
+  }
+
+  function transcriptViewActive(panel) {
+    const tab = transcriptTab(panel);
+    if (tab) return tab.getAttribute('aria-selected') === 'true' && visible(tab);
+    return panel.matches(PANEL) || [...panel.querySelectorAll(transcriptContent)].some(visible);
+  }
+
+  async function ensureTranscript(task, report, preferred) {
+    const attempted = new WeakSet();
+    const until = Date.now() + LIMITS.initialWait;
+    while (Date.now() < until) {
+      check(task);
+      const panels = transcriptPanels().filter(panelVisible);
+      if (preferred && panels.includes(preferred)) {
+        panels.splice(panels.indexOf(preferred), 1);
+        panels.unshift(preferred);
+      }
+      const views = panels.filter(transcriptViewActive);
+      const ready = views.find(panel => [...panel.querySelectorAll(ROW)].some(visible)) || views[0];
+      if (ready) return ready;
+      // Use YouTube's own buttons. Never make a stale hidden panel visible by editing attributes.
+      const tab = panels.map(transcriptTab).find(el => el && visible(el) && !attempted.has(el));
+      const openers = [...document.querySelectorAll(
+        'ytd-video-description-transcript-section-renderer button, ' +
+        'ytd-video-description-transcript-section-renderer [role="button"], ' +
+        'ytd-watch-metadata button, ytd-watch-metadata [role="button"]'
+      )].filter(el => !el.closest(OWN) && visible(el) && isTranscriptControl(el) && !attempted.has(el));
+      const expand = [...document.querySelectorAll(
+        'ytd-watch-metadata #description #expand, ytd-watch-metadata #description-inline-expander #expand, ' +
+        'ytd-watch-metadata ytd-text-inline-expander #expand'
+      )].find(el => visible(el) && !attempted.has(el));
+      const next = tab || openers[0] || expand;
+      if (next && !next.disabled && next.getAttribute('aria-disabled') !== 'true') {
+        attempted.add(next);
+        report(tab ? 'Abriendo la pestaña Transcripción…' : 'Abriendo la transcripción…');
+        next.click();
+      } else report('Esperando la transcripción de YouTube…');
+      await wait(200, task);
+    }
+    throw new Error('No se ha encontrado una transcripción disponible. Abre «Mostrar transcripción» y vuelve a intentarlo.');
+  }
+
   function searchInputs(panel) {
     return [...panel.querySelectorAll('input:not([type="checkbox"]):not([type="radio"]), textarea')]
       .filter(el => !el.closest(OWN) && visible(el));
@@ -98,17 +165,19 @@
   }
 
   function sameContext(task) {
-    return videoKey() === task.video && navigationRevision === task.revision && task.panel.isConnected &&
-      task.track === trackKey(task.panel);
+    return videoKey() === task.video && navigationRevision === task.revision &&
+      (!task.host || task.host.isConnected) && (!task.panel || (task.panel.isConnected &&
+        task.track === trackKey(task.panel) && task.panelTarget === task.panel.getAttribute('target-id') &&
+        task.tabState === (transcriptTab(task.panel)?.getAttribute('aria-selected') ?? null)));
   }
 
   function check(task, deadline = true) {
     if (task.signal.aborted) throw abortError(task.signal.reason?.message);
     if (!sameContext(task)) throw abortError('El vídeo, el idioma o el panel ha cambiado.');
-    if (task.panel.getAttribute('visibility') === 'ENGAGEMENT_PANEL_VISIBILITY_HIDDEN') {
+    if (task.panel && !panelVisible(task.panel)) {
       throw abortError('Se ha cerrado la transcripción.');
     }
-    if (searchIsActive(task.panel)) throw new Error('Borra la búsqueda del panel para copiar toda la transcripción.');
+    if (task.panel && searchIsActive(task.panel)) throw new Error('Borra la búsqueda del panel para copiar toda la transcripción.');
     if (deadline && Date.now() > task.deadline) {
       const error = new Error('Se alcanzó el límite de lectura; puede faltar texto.');
       error.name = 'ScanTimeout';
@@ -208,7 +277,7 @@
   function readDOM(panel, store) {
     const occurrences = new Map();
     for (const row of panel.querySelectorAll(ROW)) {
-      if (row.closest('[hidden], [aria-hidden="true"]')) continue;
+      if (!visible(row)) continue;
       const time = row.querySelector('.ytwTranscriptSegmentViewModelTimestamp, .segment-timestamp');
       const candidates = [...row.querySelectorAll(
         ':scope > span.ytAttributedStringHost, :scope > span[role="text"], ' +
@@ -232,8 +301,11 @@
     let pagePanel;
     try {
       const pageDocument = typeof unsafeWindow !== 'undefined' ? unsafeWindow.document : document;
-      pagePanel = [...pageDocument.querySelectorAll(PANEL)].find(el =>
-        el.getAttribute('target-id') === task.panel.getAttribute('target-id'));
+      // Map the exact DOM panel across userscript worlds. Unknown/absent target-id
+      // values are not unique and must never select another panel's backing data.
+      const index = [...document.querySelectorAll(PANEL_ROOT)].indexOf(task.panel);
+      pagePanel = pageDocument.querySelectorAll(PANEL_ROOT)[index];
+      if (!pagePanel || !task.panel.isSameNode(pagePanel)) return;
     } catch { return; }
     if (!pagePanel) return;
     const hosts = [pagePanel, ...pagePanel.querySelectorAll(
@@ -276,7 +348,7 @@
 
   function findScroller(panel) {
     const ancestors = [];
-    let node = panel.querySelector(ROW)?.parentElement;
+    let node = [...panel.querySelectorAll(ROW)].find(visible)?.parentElement;
     while (node && panel.contains(node)) {
       ancestors.push(node);
       if (node === panel) break;
@@ -612,33 +684,42 @@
     return dialog;
   }
 
-  function mount(panel) {
-    const previous = controllers.get(panel);
-    if (previous?.bar.isConnected && previous.bar.parentElement === panel) return;
+  function mount(host, placement = 'panel') {
+    const previous = controllers.get(host);
+    if (previous?.bar.isConnected && previous.bar.parentElement === host) return;
     previous?.dispose();
-    panel.querySelector(`:scope > .${BAR}`)?.remove();
+    host.querySelector(`:scope > .${BAR}`)?.remove();
     const bar = element('div', BAR);
+    bar.dataset.placement = placement;
     const label = element('div', 'ytcopy-label');
     label.append(element('span', '', 'Copiar transcripción'), element('span', 'ytcopy-version', `v${VERSION}`));
     const actions = element('div', 'ytcopy-actions');
-    const status = element('div', 'ytcopy-status', 'Copia el idioma mostrado en el panel.');
+    const idleMessage = placement === 'actions' ? '' : 'Copia el idioma mostrado en el panel.';
+    const status = element('div', 'ytcopy-status', idleMessage);
     status.setAttribute('role', 'status');
     status.setAttribute('aria-live', 'polite');
     const meter = element('progress', 'ytcopy-progress');
     meter.max = 1;
     meter.hidden = true;
     meter.setAttribute('aria-label', 'Recorrido del panel, no porcentaje de transcripción recuperada');
-    const plain = button(actions, 'Copiar texto', () => run('copy', false), 'ytcopy-primary');
+    const plain = button(actions, placement === 'actions' ? 'Copiar transcripción' : 'Copiar texto', () => run('copy', false), 'ytcopy-primary');
     const timed = button(actions, 'Con tiempos', () => run('copy', true));
     const view = button(actions, 'Ver texto', () => run('preview', false));
     const save = button(actions, 'TXT', () => run('download', false));
+    plain.title = `Copiar toda la transcripción sin tiempos · v${VERSION}`;
     view.title = 'Revisar el texto y elegir formato antes de copiar';
     save.title = 'Guardar la transcripción como archivo de texto';
     const cancel = button(actions, 'Cancelar', () => active?.controller.abort(abortError('Lectura cancelada.')));
     cancel.hidden = true;
     bar.append(label, actions, meter, status);
-    const header = panel.querySelector(':scope > #header');
-    if (header) header.after(bar); else panel.prepend(bar);
+    if (placement === 'actions') {
+      host.setAttribute('data-ytcopy-actions-host', '');
+      // Keep outside ytd-menu-renderer: YouTube manages/recycles its button lists.
+      host.append(bar);
+    } else {
+      const header = host.querySelector(':scope > #header');
+      if (header) header.after(bar); else host.prepend(bar);
+    }
     let disposed = false;
     function busy(value) {
       for (const btn of [plain, timed, view, save]) btn.disabled = value;
@@ -649,26 +730,34 @@
     async function run(action, withTimes) {
       if (disposed) return;
       if (active) { status.textContent = 'Ya hay una lectura en curso.'; return; }
-      if (searchIsActive(panel)) { status.textContent = 'Borra la búsqueda del panel para copiar toda la transcripción.'; searchInputs(panel)[0]?.focus(); return; }
       const sourceFocus = document.activeElement;
       const controller = new AbortController();
-      const task = {panel, signal: controller.signal, video: videoKey(), revision: navigationRevision,
-        track: trackKey(panel), deadline: Date.now() + LIMITS.scan};
+      const task = {host, panel: null, signal: controller.signal, video: videoKey(), revision: navigationRevision,
+        track: null, panelTarget: null, tabState: null, deadline: Date.now() + LIMITS.scan};
       const operation = {controller, task};
       active = operation;
       busy(true);
-      status.textContent = 'Leyendo transcripción…';
+      status.textContent = 'Buscando transcripción…';
       let nextPreview = null;
       const onInput = event => {
-        if (!bar.contains(event.target)) controller.abort(abortError('La búsqueda o el idioma ha cambiado.'));
+        if (!event.target.closest?.(OWN)) controller.abort(abortError('La búsqueda o el idioma ha cambiado.'));
       };
       const onKey = event => {
         if (event.key === 'Escape') { controller.abort(abortError('Lectura cancelada.')); event.preventDefault(); event.stopImmediatePropagation(); }
       };
-      panel.addEventListener('input', onInput, true);
-      panel.addEventListener('change', onInput, true);
       window.addEventListener('keydown', onKey, true);
       try {
+        const panel = await ensureTranscript(task, message => { status.textContent = message; }, placement === 'panel' ? host : null);
+        task.panel = panel;
+        task.track = trackKey(panel);
+        task.panelTarget = panel.getAttribute('target-id');
+        task.tabState = transcriptTab(panel)?.getAttribute('aria-selected') ?? null;
+        if (searchIsActive(panel)) {
+          searchInputs(panel)[0]?.focus();
+          throw new Error('Borra la búsqueda del panel para copiar toda la transcripción.');
+        }
+        panel.addEventListener('input', onInput, true);
+        panel.addEventListener('change', onInput, true);
         const result = await collect(task, info => {
           status.textContent = `${info.phase} · ${info.count.toLocaleString()} segmentos recogidos…`;
           if (info.progress === null) meter.removeAttribute('value'); else meter.value = info.progress;
@@ -695,17 +784,23 @@
       } catch (error) {
         status.textContent = error.name === 'AbortError' ? error.message : `Error: ${error.message}`;
       } finally {
-        panel.removeEventListener('input', onInput, true);
-        panel.removeEventListener('change', onInput, true);
+        task.panel?.removeEventListener('input', onInput, true);
+        task.panel?.removeEventListener('change', onInput, true);
         window.removeEventListener('keydown', onKey, true);
         busy(false);
         if (active === operation) active = null;
         if (nextPreview && sameContext(task) && !task.signal.aborted) preview(nextPreview.result, nextPreview.withTimes, nextPreview.error || '', sourceFocus);
       }
     }
-    const controller = {bar, reset: () => { if (!active || active.task.panel !== panel) status.textContent = 'Copia el idioma mostrado en el panel.'; },
-      dispose: () => { disposed = true; bar.remove(); if (active?.task.panel === panel) active.controller.abort(abortError('El panel se ha reconstruido.')); }};
-    controllers.set(panel, controller);
+    const controller = {bar, placement,
+      reset: () => { if (!active || active.task.host !== host) status.textContent = idleMessage; },
+      dispose: () => {
+        disposed = true;
+        bar.remove();
+        if (placement === 'actions') host.removeAttribute('data-ytcopy-actions-host');
+        if (active?.task.host === host) active.controller.abort(abortError('Los controles se han reconstruido.'));
+      }};
+    controllers.set(host, controller);
   }
 
   const styleId = 'ytcopy-transcript-style';
@@ -720,6 +815,14 @@
       html[dark] .${BAR}, html[dark] .${DIALOG} { --ytcopy-bg:var(--yt-spec-base-background,#181818);
         --ytcopy-fg:var(--yt-spec-text-primary,#f1f1f1); --ytcopy-muted:var(--yt-spec-text-secondary,#aaa); }
       .${BAR} { display:block; flex:0 0 auto; min-width:0; padding:10px 14px 12px; background:var(--ytcopy-bg); border-bottom:1px solid var(--ytcopy-line); }
+      [data-ytcopy-actions-host] {display:flex!important;flex-wrap:wrap!important;gap:8px;align-items:center;min-width:0;max-width:100%;}
+      [data-ytcopy-actions-host] > #menu {max-width:100%;min-width:0;}
+      .${BAR}[data-placement="actions"] {display:flex;flex-wrap:wrap;align-items:center;gap:6px;flex:0 1 auto;
+        max-width:100%;padding:0;background:transparent;border:0;}
+      .${BAR}[data-placement="actions"] .ytcopy-label {order:2;margin:0;}
+      .${BAR}[data-placement="actions"] .ytcopy-label > span:first-child {display:none;}
+      .${BAR}[data-placement="actions"] .ytcopy-status, .${BAR}[data-placement="actions"] .ytcopy-progress {order:3;flex-basis:100%;margin-top:2px;}
+      .${BAR}[data-placement="actions"] .ytcopy-actions {min-width:0;max-width:100%;}
       .ytcopy-label {display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;font-weight:600;}
       .ytcopy-version {font-size:11px;color:var(--ytcopy-muted);font-weight:400;white-space:nowrap;}
       .ytcopy-actions {display:flex;flex-wrap:wrap;gap:6px;align-items:center;}
@@ -753,25 +856,36 @@
   }
 
   function mountAll() {
-    for (const [panel, controller] of controllers) {
-      if (!panel.isConnected || !panel.matches(PANEL)) { controller.dispose(); controllers.delete(panel); }
+    const onWatch = location.pathname === '/watch' && !!new URL(location.href).searchParams.get('v');
+    const panels = onWatch ? transcriptPanels() : [];
+    const hosts = onWatch ? [...document.querySelectorAll(ACTION_HOST)] : [];
+    for (const [host, controller] of controllers) {
+      if (!host.isConnected || !(controller.placement === 'actions' ? hosts : panels).includes(host)) {
+        controller.dispose(); controllers.delete(host);
+      }
     }
-    document.querySelectorAll(PANEL).forEach(mount);
+    panels.forEach(panel => mount(panel));
+    hosts.forEach(host => mount(host, 'actions'));
   }
   function scheduleMount() {
     if (mountTimer !== null) return;
     mountTimer = setTimeout(() => { mountTimer = null; mountAll(); }, 100);
   }
+  const discoverySelector = `${PANEL_ROOT}, ${ROW}, ${ACTION_HOST}, .${BAR}, [role="tab"], ${transcriptContent}`;
   const pageObserver = new MutationObserver(records => {
     const needsMount = records.some(record => {
-      if (record.type === 'attributes') return true;
-      if ((record.target.nodeType === 1 ? record.target : record.target.parentElement)?.closest(OWN)) return false;
+      const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
+      if (target?.closest(OWN)) return false;
+      if (record.type === 'attributes') {
+        return !!target?.matches(`${PANEL_ROOT}, [role="tab"], ytd-watch-flexy, ${ACTION_HOST}`);
+      }
       return [...record.addedNodes, ...record.removedNodes].some(node => node.nodeType === 1 &&
-        (node.matches(`${PANEL}, .${BAR}`) || node.querySelector(`${PANEL}, .${BAR}`)));
+        (node.matches(discoverySelector) || node.querySelector(discoverySelector)));
     });
     if (needsMount) scheduleMount();
   });
-  pageObserver.observe(document.documentElement, {childList: true, subtree: true, attributes: true, attributeFilter: ['target-id', 'visibility']});
+  pageObserver.observe(document.documentElement, {childList: true, subtree: true, attributes: true,
+    attributeFilter: ['target-id', 'visibility', 'aria-selected', 'hidden', 'video-id', 'id']});
   function navigate() {
     navigationRevision++;
     active?.controller.abort(abortError('El vídeo ha cambiado.'));
@@ -781,7 +895,9 @@
   document.addEventListener('yt-navigate-start', navigate);
   document.addEventListener('yt-navigate-finish', () => { scheduleMount(); for (const controller of controllers.values()) controller.reset(); });
   document.addEventListener('yt-page-data-updated', scheduleMount);
-  window.addEventListener('popstate', navigate);
+  window.addEventListener('popstate', () => { navigate(); scheduleMount(); });
+  window.addEventListener('pageshow', scheduleMount);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) scheduleMount(); });
   window.addEventListener('pagehide', () => { active?.controller.abort(abortError('Se ha cerrado la página.')); });
   document.addEventListener('click', event => {
     if (!active || event.target.closest?.(OWN)) return;
