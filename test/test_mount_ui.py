@@ -65,13 +65,14 @@ class MountUI(unittest.TestCase):
         self.assertEqual(self.errors, [])
 
     def load(self, body, setup='', path='/watch?v=testvideo01'):
-        html = f'<!DOCTYPE html><html dark><head><title>Prueba de transcripción - YouTube</title><style>{CSS}</style></head><body>{body}</body></html>'
-        self.page.route('**/*', lambda route: route.fulfill(status=200, content_type='text/html', body=html))
+        html = f'<!DOCTYPE html><html dark><head><meta charset="utf-8"><title>Prueba de transcripción - YouTube</title><style>{CSS}</style></head><body>{body}</body></html>'
+        self.page.route('**/*', lambda route: route.fulfill(status=200, content_type='text/html; charset=utf-8', body=html))
         if os.environ.get('YTCOPY_NO_NAVIGATION'):
             self.page.set_content(html)
             self.page.evaluate('(path)=>{window.__ytcopyLocation=new URL("http://127.0.0.1:8765"+path)}', path)
         else:
             self.page.goto('http://127.0.0.1:8765' + path)
+        self.assertEqual(self.page.evaluate('document.characterSet'), 'UTF-8')
         self.page.evaluate('window.copied=[]; window.GM={setClipboard:async text=>{window.copied.push(text)}}; window.unsafeWindow=window;')
         if setup:
             self.page.evaluate(setup)
