@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YouTube - Copiar transcripción completa
 // @namespace    eros.youtube.transcript
-// @version      1.3.0
-// @description  Copia, revisa y guarda la transcripción. Panel moderno/clásico, carga progresiva y avisos de integridad.
+// @version      1.4.0
+// @description  Copia, revisa y guarda la transcripción. Panel moderno/clásico, lectura directa sin scroll ni caché.
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
 // @run-at       document-idle

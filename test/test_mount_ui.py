@@ -225,7 +225,9 @@ class MountUI(unittest.TestCase):
         expect(self.actionbar()).to_have_count(0)
 
     def test_19_switch_tabs_mid_read_cancels(self):
-        self.load(ACTIONS + panel())
+        # With immediate extraction the old fixture has already finished copying.
+        # Hold a real loading state to test a tab change DURING an active read.
+        self.load(ACTIONS + panel(rows=ROWS + '<div aria-busy="true">Cargando transcripción</div>'))
         self.actionbar().get_by_role('button', name='Copiar transcripción', exact=True).click()
         expect(self.actionbar().get_by_role('button', name='Cancelar')).to_be_visible()
         self.page.evaluate('document.querySelector("#transcript-tab").setAttribute("aria-selected","false");document.querySelector("#chapters").setAttribute("aria-selected","true")')

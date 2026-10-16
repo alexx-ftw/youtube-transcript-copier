@@ -1,5 +1,16 @@
 # Historial de cambios
 
+## 1.4.0
+
+- Elimina el recorrido automático del transcript: lee el modelo de datos del panel, incluyendo segmentos aún no renderizados.
+- Corrige el flujo anterior, que consultaba datos internos pero después recorría igualmente toda la lista.
+- No añade caché, precarga ni peticiones API propias. Cada clic lee de nuevo los datos actuales de la página.
+- Si todo el texto está en el DOM, lo obtiene de una sola vez sin desplazar el panel ni esperar al final del scroll.
+- Espera solo si YouTube aún está cargando. Advierte antes de copiar fragmentos virtualizados, paginación, datos ilegibles o inconsistencias.
+- Conserva interfaz compacta, formatos, permisos, cancelación, repeticiones, aislamiento de vídeo/idioma y auto-update.
+- Añade 36 pruebas de extracción directa, incluida una lista de 3.000 segmentos con solo 3 filas renderizadas, cero scroll y cero solicitudes HTTP propias.
+- Adapta la prueba de cambio de pestaña a una carga realmente pendiente; la copia inmediata de datos ya listos no necesita retrasos artificiales.
+
 ## 1.3.0
 
 - Sustituye la barra de cuatro botones bajo el vídeo por un control compacto de copia y opciones, del mismo alto que los botones nativos.

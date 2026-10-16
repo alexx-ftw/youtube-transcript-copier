@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YouTube - Copiar transcripción completa
 // @namespace    eros.youtube.transcript
-// @version      1.3.0
-// @description  Copia, revisa y guarda la transcripción. Panel moderno/clásico, carga progresiva y avisos de integridad.
+// @version      1.4.0
+// @description  Copia, revisa y guarda la transcripción. Panel moderno/clásico, lectura directa sin scroll ni caché.
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
 // @run-at       document-idle
@@ -20,7 +20,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.3.0';
+  const VERSION = '1.4.0';
   const PANEL_ROOT = 'ytd-engagement-panel-section-list-renderer';
   const ACTION_HOST = 'ytd-watch-metadata #actions-inner, #actions.ytd-watch-metadata #actions-inner';
   const PANEL = [
@@ -35,9 +35,6 @@
   const LIMITS = Object.freeze({
     initialWait: 12000,
     scan: 180000,
-    step: 180,
-    renderWait: 1400,
-    bottomQuiet: 1800,
     modelNodes: 60000,
     segments: 60000,
     characters: 12000000,
@@ -298,53 +295,137 @@
     }
   }
 
-  async function readModels(task, store) {
-    let pagePanel;
+  // Read the existing page model for each click. No requests, prefetch or cache.
+  // Row elements are a virtualized view; their individual models are not a full list.
+  const MODEL_HOSTS = 'yt-section-list-renderer, yt-item-section-renderer, ' +
+    'ytd-transcript-renderer, ytd-transcript-search-panel-renderer, ytd-transcript-segment-list-renderer';
+  const MODEL_SKIP = new Set(['trackingParams', 'clickTrackingParams', 'loggingDirectives',
+    'accessibility', 'accessibilityData', 'frameworkUpdates', 'responseContext',
+    'subMenuItems', 'captionTracks', 'translationLanguages', 'reloadContinuationData',
+    'menu', 'menuRenderer', 'navigationEndpoint', 'onTap', 'onClick']);
+
+  function panelModelRoots(panel) {
     try {
       const pageDocument = typeof unsafeWindow !== 'undefined' ? unsafeWindow.document : document;
-      // Map the exact DOM panel across userscript worlds. Unknown/absent target-id
-      // values are not unique and must never select another panel's backing data.
-      const index = [...document.querySelectorAll(PANEL_ROOT)].indexOf(task.panel);
-      pagePanel = pageDocument.querySelectorAll(PANEL_ROOT)[index];
-      if (!pagePanel || !task.panel.isSameNode(pagePanel)) return;
-    } catch { return; }
-    if (!pagePanel) return;
-    const hosts = [pagePanel, ...pagePanel.querySelectorAll(
-      'yt-section-list-renderer, yt-item-section-renderer, ytd-transcript-renderer, ' +
-      'ytd-transcript-search-panel-renderer, ytd-transcript-segment-list-renderer, ' + ROW
-    )];
-    const stack = [];
-    for (const host of hosts) {
-      for (const owner of [host, safe(host, 'polymerController'), safe(host, 'inst')]) {
-        const raw = host.matches(ROW);
-        const data = safe(owner, '__data');
-        for (const value of [safe(owner, 'data'), safe(owner, 'viewModel'), safe(data, 'data'), safe(data, 'viewModel')]) {
-          if (value && typeof value === 'object') stack.push({value, raw});
+      const index = [...document.querySelectorAll(PANEL_ROOT)].indexOf(panel);
+      const pagePanel = pageDocument.querySelectorAll(PANEL_ROOT)[index];
+      if (!pagePanel || !panel.isSameNode(pagePanel)) return [];
+      const roots = new Set();
+      for (const host of [pagePanel, ...pagePanel.querySelectorAll(MODEL_HOSTS)]) {
+        for (const owner of [host, safe(host, 'polymerController'), safe(host, 'inst')]) {
+          const data = safe(owner, '__data');
+          for (const value of [safe(owner, 'data'), safe(owner, 'viewModel'), safe(data, 'data'), safe(data, 'viewModel')]) {
+            if (value && typeof value === 'object') roots.add(value);
+          }
         }
       }
-    }
+      return [...roots];
+    } catch { return []; } // A sandbox may not expose page properties; DOM remains readable.
+  }
+
+  async function parsePageModel(root, task) {
+    const segments = [];
+    const stack = [{value: root, raw: false}];
     const seen = new WeakSet();
-    let visits = 0;
-    while (stack.length && visits < LIMITS.modelNodes) {
+    let visits = 0, characters = 0, structured = Array.isArray(root), pending = false, malformed = false, limited = false;
+    const owner = safe(root, 'videoId') || safe(safe(root, 'videoDetails'), 'videoId') ||
+      safe(safe(safe(root, 'currentVideoEndpoint'), 'watchEndpoint'), 'videoId');
+    if (owner && owner !== new URL(location.href).searchParams.get('v')) {
+      return {segments, complete: false, foreign: true};
+    }
+    while (stack.length) {
       const {value, raw} = stack.pop();
-      if (!value || typeof value !== 'object' || seen.has(value) || safe(value, 'nodeType')) continue;
-      seen.add(value);
-      visits++;
+      if (!value || typeof value !== 'object' || safe(value, 'nodeType')) continue;
+      if (++visits > LIMITS.modelNodes) { limited = true; break; }
       if (visits % 1000 === 0) await wait(0, task);
-      const segment = safe(value, 'transcriptSegmentRenderer') || safe(value, 'transcriptSegmentViewModel');
-      if (segment || raw) {
-        const parsed = modelSegment(segment || value);
-        if (parsed) { store.add(parsed, 'model'); continue; }
+      // Parse before the cycle guard: repeated entries in a segment array can
+      // deliberately contain identical objects, times and text.
+      const cue = safe(value, 'transcriptSegmentRenderer') || safe(value, 'transcriptSegmentViewModel');
+      if (cue || raw && ('startMs' in value || 'startTimeMs' in value || 'startTimeText' in value || 'timestamp' in value)) {
+        const segment = modelSegment(cue || value);
+        if (!segment) { malformed = true; continue; }
+        if (segments.length >= LIMITS.segments || characters + segment.text.length > LIMITS.characters) {
+          limited = true; break;
+        }
+        segments.push(segment);
+        characters += segment.text.length;
+        continue;
       }
+      if (seen.has(value)) continue;
+      seen.add(value);
+      if (safe(value, 'continuationItemRenderer') || safe(value, 'continuationItemViewModel') ||
+          safe(safe(value, 'nextContinuationData'), 'continuation') ||
+          safe(safe(value, 'continuationCommand'), 'token') || safe(value, 'hasMore') === true) pending = true;
       let keys;
-      try { keys = Object.keys(value); } catch { continue; }
+      try { keys = Object.keys(value); } catch { limited = true; continue; }
       for (let i = keys.length - 1; i >= 0; i--) {
-        const child = safe(value, keys[i]);
-        if (child && typeof child === 'object') stack.push({value: child, raw: false});
+        const key = keys[i];
+        if (MODEL_SKIP.has(key)) continue;
+        let child;
+        try { child = value[key]; } catch { limited = true; continue; }
+        if (!child || typeof child !== 'object') continue;
+        if (key === 'tabs' && Array.isArray(child)) {
+          const selected = child.filter(tab => (safe(tab, 'tabRenderer') || tab).selected === true);
+          if (selected.length !== 1) { malformed = true; continue; }
+          stack.push({value: selected[0], raw: false});
+          continue;
+        }
+        const list = Array.isArray(child) && ['initialSegments', 'segments', 'contents', 'items'].includes(key);
+        if (list) structured = true;
+        if (Array.isArray(child) && ['initialSegments', 'segments'].includes(key)) {
+          if (child.length > LIMITS.segments) { limited = true; continue; }
+          for (let j = child.length - 1; j >= 0; j--) {
+            if (!child[j]) malformed = true;
+            else stack.push({value: child[j], raw: true});
+          }
+        } else stack.push({value: child, raw: false});
+        if (stack.length > LIMITS.modelNodes) { limited = true; stack.length = 0; break; }
       }
     }
-    if (stack.length) store.warnings.add('Los datos internos son muy grandes; su lectura ha sido limitada.');
     check(task);
+    segments.sort((a, b) => a.seconds - b.seconds);
+    return {segments, pending, malformed, limited, structured,
+      complete: structured && !pending && !malformed && !limited && segments.length > 0};
+  }
+
+  function includesSegments(whole, sample) {
+    const counts = new Map();
+    for (const cue of whole) {
+      const key = `${Math.floor(cue.seconds)}\u0000${cue.text}`;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    return sample.every(cue => {
+      const key = `${Math.floor(cue.seconds)}\u0000${cue.text}`;
+      const left = counts.get(key) || 0;
+      if (!left) return false;
+      counts.set(key, left - 1);
+      return true;
+    });
+  }
+
+  async function readPageModels(task, observed) {
+    const candidates = [];
+    let incompatible = false;
+    for (const root of panelModelRoots(task.panel)) {
+      const candidate = await parsePageModel(root, task);
+      if (candidate.foreign) { incompatible = true; continue; }
+      if (!candidate.segments.length) continue;
+      if (!includesSegments(candidate.segments, observed)) { incompatible = true; continue; }
+      candidates.push(candidate);
+    }
+    // Do not merge independent model roots: the same list may be exposed through
+    // multiple hosts, or an old/default language may still be present elsewhere.
+    candidates.sort((a, b) => b.segments.length - a.segments.length);
+    const best = candidates[0] || null;
+    if (best) {
+      // A descendant with only the first page cannot override its parent's
+      // continuation marker or an unreadable cue and pretend the list is complete.
+      best.complete = best.complete && !candidates.some(candidate =>
+        !candidate.complete && includesSegments(candidate.segments, best.segments));
+      if (candidates.some(candidate => !includesSegments(best.segments, candidate.segments) &&
+          !includesSegments(candidate.segments, best.segments))) best.complete = false;
+    }
+    return {best, incompatible};
   }
 
   function findScroller(panel) {
@@ -386,126 +467,54 @@
   }
 
   async function collect(task, update) {
-    const store = new SegmentStore();
-    const positions = new Map();
-    let readError = null;
-    let readTimer = null;
-    const read = () => { try { readDOM(task.panel, store); } catch (error) { readError = error; } };
-    const observer = new MutationObserver(records => {
-      if (records.every(record => (record.target.nodeType === 1 ? record.target : record.target.parentElement)?.closest(OWN))) return;
-      if (readTimer === null) readTimer = setTimeout(() => { readTimer = null; read(); }, 40);
-    });
-    const move = (scroller, top) => {
-      if (!positions.has(scroller)) {
-        const properties = ['scroll-behavior', 'overflow-anchor', 'scroll-snap-type'];
-        positions.set(scroller, {top: scroller.scrollTop, styles: properties.map(name =>
-          [name, scroller.style.getPropertyValue(name), scroller.style.getPropertyPriority(name)])});
-        scroller.style.setProperty('scroll-behavior', 'auto', 'important');
-        scroller.style.setProperty('overflow-anchor', 'none', 'important');
-        scroller.style.setProperty('scroll-snap-type', 'none', 'important');
+    const until = Date.now() + LIMITS.initialWait;
+    // Waiting for YouTube's existing load is not a panel traversal. When the
+    // model is ready, this loop returns in its first iteration, even with 0 rows.
+    while (true) {
+      check(task);
+      if (isLoading(task.panel)) {
+        if (Date.now() >= until) throw new Error('YouTube no terminó de cargar los datos de la transcripción. Vuelve a intentarlo.');
+        update({count: 0, phase: 'Esperando datos de YouTube', progress: null});
+        await wait(100, task);
+        continue;
       }
-      scroller.scrollTop = top;
-      scroller.dispatchEvent(new Event('scroll'));
-    };
-    const scrollAndWait = async (scroller, top) => {
-      const oldTop = scroller.scrollTop;
+      const snapshot = new SegmentStore();
+      readDOM(task.panel, snapshot);
+      const observed = snapshot.values();
       const signature = domSignature(task.panel);
-      const virtual = likelyVirtual(task.panel, scroller);
-      move(scroller, top);
-      await wait(LIMITS.step, task);
-      if (virtual && Math.abs(oldTop - top) > 1) {
-        const renderDeadline = Date.now() + LIMITS.renderWait;
-        while (domSignature(task.panel) === signature && Date.now() < renderDeadline) await wait(100, task);
-        if (domSignature(task.panel) === signature) {
-          store.warnings.add('Algunas filas virtualizadas no confirmaron su actualización; puede faltar texto.');
-        } else await wait(80, task);
+      const {best, incompatible} = await readPageModels(task, observed);
+      check(task);
+      // A long model walk can yield to the page. Never validate against a sample
+      // from a previous render/track if YouTube changed it in the meantime.
+      if (isLoading(task.panel) || signature !== domSignature(task.panel)) {
+        if (Date.now() >= until) throw new Error('La transcripción está cambiando. Espera a que YouTube termine de cargarla.');
+        await wait(0, task);
+        continue;
       }
-      read();
-    };
-    const progress = (scroller, phase) => {
-      // A percentage describes panel traversal, not transcript completeness.
-      const max = scroller ? scroller.scrollHeight - scroller.clientHeight : 0;
-      update({count: store.dom.size || store.models.size, phase,
-        progress: max > 0 ? Math.min(1, scroller.scrollTop / max) : null});
-    };
-    check(task);
-    observer.observe(task.panel, {childList: true, subtree: true, characterData: true});
-    try {
-      read();
-      await readModels(task, store);
-      const initialDeadline = Date.now() + LIMITS.initialWait;
-      while (!store.size && Date.now() < initialDeadline) {
-        progress(null, 'Esperando segmentos');
-        await wait(250, task);
-        read();
-        if (readError) throw readError;
-        if (store.size) break;
-        await readModels(task, store);
-      }
-      if (!store.size) throw new Error('YouTube aún no ha proporcionado segmentos. Abre la transcripción o vuelve a intentarlo.');
-      let scroller = findScroller(task.panel);
-      if (scroller) await scrollAndWait(scroller, 0);
-      else await wait(LIMITS.step, task);
-      let stableSince = Date.now();
-      let previousHeight = -1;
-      let stuck = 0;
-      while (true) {
-        check(task);
-        read();
-        if (readError) throw readError;
-        const current = findScroller(task.panel);
-        if (current && current !== scroller) {
-          scroller = current;
-          await scrollAndWait(scroller, 0);
-          stableSince = Date.now();
-          continue;
-        }
-        const height = scroller?.scrollHeight || 0;
-        if (height !== previousHeight) { previousHeight = height; stableSince = Date.now(); }
-        const bottom = scroller ? Math.max(0, height - scroller.clientHeight) : 0;
-        const atBottom = !scroller || scroller.scrollTop >= bottom - 3;
-        progress(scroller, atBottom ? 'Comprobando final' : 'Recorriendo panel');
-        if (atBottom) {
-          if (!isLoading(task.panel) && Date.now() - Math.max(stableSince, store.lastChange) >= LIMITS.bottomQuiet) break;
-          await wait(300, task);
-        } else {
-          stableSince = Date.now();
-          const oldTop = scroller.scrollTop;
-          await scrollAndWait(scroller, Math.min(bottom, oldTop + Math.max(1, Math.floor(scroller.clientHeight * 0.6))));
-          stuck = scroller.scrollTop <= oldTop + 1 ? stuck + 1 : 0;
-          if (stuck > 6) {
-            store.warnings.add('El panel dejó de avanzar. Pausa el vídeo y repite la lectura para comprobar el resultado.');
-            break;
-          }
+      const warnings = [];
+      let segments, source;
+      if (best) {
+        segments = best.segments;
+        source = 'page-data';
+        if (!best.complete) warnings.push('Los datos del panel indican contenido pendiente, incompleto o no legible; no se ha recorrido la lista para completarlo.');
+      } else {
+        segments = observed;
+        source = 'dom';
+        if (incompatible) warnings.push('Los datos internos no coinciden con el vídeo o el texto visible. Se muestra solo el texto observado, sin mezclar fuentes.');
+        if (likelyVirtual(task.panel, findScroller(task.panel))) {
+          warnings.push('Solo se ha podido leer la parte renderizada de una lista virtualizada. Los datos completos no están accesibles en este panel; no se ha hecho scroll.');
         }
       }
-      read();
-      if (readError) throw readError;
-      await readModels(task, store);
-      if (pendingContinuation(task.panel)) store.warnings.add('El panel todavía muestra un botón para cargar más contenido.');
-    } catch (error) {
-      if (error.name !== 'ScanTimeout' || !store.size) throw error;
-      check(task, false);
-      store.warnings.add(error.message);
-    } finally {
-      observer.disconnect();
-      clearTimeout(readTimer);
-      for (const [scroller, saved] of positions) {
-        // Restore even after an explicit Cancel, but never into another video/track.
-        if (sameContext(task) && scroller.isConnected) {
-          scroller.scrollTop = saved.top;
-          scroller.dispatchEvent(new Event('scroll'));
-        }
-        for (const [name, value, priority] of saved.styles) {
-          if (value) scroller.style.setProperty(name, value, priority);
-          else scroller.style.removeProperty(name);
-        }
+      if (!segments.length) {
+        if (Date.now() >= until) throw new Error('No hay datos de transcripción legibles en la página. Abre «Mostrar transcripción» y vuelve a intentarlo.');
+        update({count: 0, phase: 'Esperando datos de YouTube', progress: null});
+        await wait(100, task);
+        continue;
       }
+      if (pendingContinuation(task.panel)) warnings.push('El panel indica que todavía queda contenido por cargar.');
+      update({count: segments.length, phase: source === 'page-data' ? 'Datos de la página leídos' : 'Texto de la página leído', progress: 1});
+      return {segments, warnings: [...warnings, ...completenessWarnings(segments, task)], task, source};
     }
-    check(task, false);
-    const segments = store.values();
-    if (!segments.length) throw new Error('No hay segmentos legibles en la transcripción.');
-    return {segments, warnings: [...store.warnings, ...completenessWarnings(segments, task)], task};
   }
 
   function completenessWarnings(segments, task) {
@@ -633,7 +642,7 @@
       notice.dataset.kind = 'warning';
       notice.textContent = 'Posible transcripción incompleta.\n' + result.warnings.join('\n') +
         '\nRevisa el texto antes de copiarlo o guardarlo.';
-    } else notice.textContent = 'Son los segmentos recuperados de YouTube. El recorrido no garantiza por sí solo que la transcripción esté completa.';
+    } else notice.textContent = 'Texto leído directamente de los datos disponibles en la página, sin desplazar el listado.';
     const modes = element('div', 'ytcopy-actions ytcopy-modes');
     const plain = button(modes, 'Texto', () => setMode(false));
     const withTimes = button(modes, 'Con tiempos', () => setMode(true));
@@ -986,7 +995,7 @@
         panel.addEventListener('input', onInput, true);
         panel.addEventListener('change', onInput, true);
         const result = await collect(task, info => {
-          report(`${info.phase} · ${info.count.toLocaleString()} segmentos recogidos…`);
+          report(`${info.phase} · ${info.count.toLocaleString()} segmentos…`);
           if (info.progress === null) meter.removeAttribute('value'); else meter.value = info.progress;
         });
         check(task, false);

@@ -22,13 +22,15 @@ No es necesario abrir el panel previamente. Si el panel está cerrado, el script
 
 Los controles siguen apareciendo dentro del panel, incluido el combinado **En este vídeo**, aunque cambie o falte su identificador. Durante la apertura y la lectura puedes cancelar; también se admite Escape.
 
-El script recorre el panel para recoger filas cargadas al desplazarse y consulta, cuando son accesibles, los datos internos de ese mismo panel. Muestra progreso y contadores, restaura el desplazamiento y conserva repeticiones legítimas. Si encuentra posibles huecos, ofrece revisión antes de copiar.
+La extracción lee directamente los datos que ya tiene cargados el panel de YouTube. No recorre el listado, no cambia su posición, no crea una caché propia ni realiza peticiones API adicionales para obtener el texto. Cada pulsación vuelve a leer el estado actual de la página. Si el texto está completo en el DOM, lo lee de una vez sin desplazarse.
+
+Si YouTube sigue cargando, espera a que termine esa carga nativa. Si solo puede acceder a un fragmento de una lista virtualizada, detecta paginación o encuentra datos incompatibles, muestra lo recuperado para revisión en lugar de copiarlo como si estuviera completo. Conserva las repeticiones legítimas, las marcas de tiempo y la protección ante cambios de vídeo o idioma.
 
 ## Privacidad y límites
 
 No utiliza servicios de transcripción externos, no incluye telemetría y no envía el texto a GitHub. GitHub sirve únicamente los archivos de distribución; el gestor realiza las comprobaciones de actualización. No se añaden permisos de ejecución nuevos para el auto-update.
 
-Está orientado al YouTube de escritorio, con el panel moderno y el clásico. No reconstruye texto ausente: un hueco puede ser silencio o contenido que YouTube no haya proporcionado. Los cambios en la interfaz de YouTube pueden requerir adaptar el script. Las comprobaciones validan la distribución, la sintaxis y 54 escenarios de interfaz en Chromium con HTML sintético. No equivalen a probar una sesión real de YouTube con Tampermonkey.
+Está orientado al YouTube de escritorio, con el panel moderno y el clásico. No reconstruye texto ausente: un hueco puede ser silencio o contenido que YouTube no haya proporcionado. Los cambios en la interfaz de YouTube pueden requerir adaptar el script. Las comprobaciones validan la distribución, la sintaxis y 90 escenarios de interfaz en Chromium con HTML sintético. No equivalen a probar una sesión real de YouTube con Tampermonkey.
 
 ## Mantener y publicar
 
@@ -36,12 +38,12 @@ Se necesita Node.js 22 o superior. Las pruebas de distribución no requieren dep
 
 ```sh
 # Tras cambiar el código, preparar una versión superior:
-npm run release -- 1.3.1
+npm run release -- 1.4.1
 npm test
 
 # Publicar los tres archivos juntos:
 git add youtube-copiar-transcripcion.user.js youtube-copiar-transcripcion.meta.js youtube-copiar-transcripcion.txt
-git commit -m "Release v1.3.1"
+git commit -m "Release v1.4.1"
 git push origin main
 ```
 
