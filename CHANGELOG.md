@@ -1,5 +1,15 @@
 # Historial de cambios
 
+## 1.3.0
+
+- Sustituye la barra de cuatro botones bajo el vídeo por un control compacto de copia y opciones, del mismo alto que los botones nativos.
+- Ajusta la etiqueta al espacio disponible: utiliza solo el icono cuando hace falta, sin eliminar acciones de YouTube.
+- Mueve Con tiempos, Ver texto y TXT a un panel no modal con botones, accesible por teclado, clic exterior y Escape.
+- Muestra Copiado temporalmente en el propio botón; elimina la fila permanente de estado y versión de la barra de acciones. La versión sigue disponible en las opciones y en la ayuda al pasar el ratón.
+- Mantiene el texto y la vista previa cuando no se puede confirmar la copia. Los errores sin texto recuperado se muestran como avisos cerrables, no como una fila nueva.
+- Conserva el panel lateral, extracción, cancelación, permisos y auto-update.
+- Añade 30 pruebas de interfaz para el control compacto y adapta las 24 existentes al nuevo acceso a opciones.
+
 ## 1.2.0
 
 - Añade Copiar transcripción, Con tiempos, Ver texto y TXT en la barra de acciones del vídeo, fuera de los botones que YouTube administra internamente.

@@ -84,6 +84,10 @@ class MountUI(unittest.TestCase):
     def actionbar(self):
         return self.page.locator('#actions-inner > .ytcopy-transcript-bar')
 
+    def advanced(self, name):
+        self.actionbar().get_by_role('button', name='Opciones de transcripción', exact=True).click()
+        return self.page.locator('.ytcopy-options').get_by_role('button', name=name, exact=True)
+
     def sidebar(self):
         return self.page.locator('#test-panel > .ytcopy-transcript-bar')
 
@@ -94,7 +98,9 @@ class MountUI(unittest.TestCase):
     def test_01_actions_exist_without_open_panel(self):
         self.load(ACTIONS)
         expect(self.actionbar().get_by_role('button', name='Copiar transcripción', exact=True)).to_be_visible()
-        expect(self.actionbar().get_by_role('button', name='Con tiempos', exact=True)).to_be_visible()
+        expect(self.page.locator('.ytcopy-options')).not_to_be_visible()
+        self.actionbar().get_by_role('button', name='Opciones de transcripción', exact=True).click()
+        expect(self.page.locator('.ytcopy-options').get_by_role('button', name='Con tiempos', exact=True)).to_be_visible()
         expect(self.page.locator('#share')).to_be_visible()
 
     def test_02_combined_panel_without_target_is_detected(self):
@@ -174,19 +180,19 @@ class MountUI(unittest.TestCase):
 
     def test_13_time_format(self):
         self.load(ACTIONS + panel())
-        self.actionbar().get_by_role('button', name='Con tiempos', exact=True).click()
+        self.advanced('Con tiempos').click()
         self.copied('[0:00] Inicio de prueba.\n[0:05] Fin de prueba.')
 
     def test_14_preview_without_clipboard_side_effect(self):
         self.load(ACTIONS + panel())
-        self.actionbar().get_by_role('button', name='Ver texto', exact=True).click()
+        self.advanced('Ver texto').click()
         expect(self.page.locator('.ytcopy-preview-text')).to_have_value('Inicio de prueba. Fin de prueba.', timeout=9000)
         self.assertEqual(self.page.evaluate('window.copied'), [])
 
     def test_15_txt_download(self):
         self.load(ACTIONS + panel())
         with self.page.expect_download(timeout=9000) as info:
-            self.actionbar().get_by_role('button', name='TXT', exact=True).click()
+            self.advanced('TXT').click()
         self.assertEqual(Path(info.value.path()).read_text(), 'Inicio de prueba. Fin de prueba.')
         self.assertTrue(info.value.suggested_filename.endswith('.txt'))
 
@@ -199,8 +205,15 @@ class MountUI(unittest.TestCase):
         self.page.set_viewport_size({'width':320,'height':800})
         self.load(ACTIONS + panel())
         expect(self.actionbar()).to_be_visible()
-        for name in ['Copiar transcripción','Con tiempos','Ver texto','TXT']:
+        for name in ['Copiar transcripción', 'Opciones de transcripción']:
             btn = self.actionbar().get_by_role('button',name=name,exact=True)
+            expect(btn).to_be_visible()
+            box = btn.bounding_box()
+            self.assertGreaterEqual(box['x'], 0)
+            self.assertLessEqual(box['x'] + box['width'], 321)
+        self.actionbar().get_by_role('button', name='Opciones de transcripción').click()
+        for name in ['Con tiempos', 'Ver texto', 'TXT']:
+            btn = self.page.locator('.ytcopy-options').get_by_role('button',name=name,exact=True)
             expect(btn).to_be_visible()
             box = btn.bounding_box()
             self.assertGreaterEqual(box['x'], 0)

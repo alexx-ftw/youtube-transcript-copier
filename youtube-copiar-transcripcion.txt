@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube - Copiar transcripción completa
 // @namespace    eros.youtube.transcript
-// @version      1.2.0
+// @version      1.3.0
 // @description  Copia, revisa y guarda la transcripción. Panel moderno/clásico, carga progresiva y avisos de integridad.
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -20,7 +20,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.2.0';
+  const VERSION = '1.3.0';
   const PANEL_ROOT = 'ytd-engagement-panel-section-list-renderer';
   const ACTION_HOST = 'ytd-watch-metadata #actions-inner, #actions.ytd-watch-metadata #actions-inner';
   const PANEL = [
@@ -30,7 +30,8 @@
   const ROW = 'transcript-segment-view-model, ytd-transcript-segment-renderer';
   const BAR = 'ytcopy-transcript-bar';
   const DIALOG = 'ytcopy-transcript-dialog';
-  const OWN = `.${BAR}, .${DIALOG}`;
+  const OWN = `.${BAR}, .${DIALOG}, .ytcopy-options, .ytcopy-toast`;
+  let optionsSerial = 0;
   const LIMITS = Object.freeze({
     initialWait: 12000,
     scan: 180000,
@@ -684,70 +685,296 @@
     return dialog;
   }
 
+  // Small, self-contained icons: no fonts, CDN or changes to YouTube's own buttons.
+  function icon(name) {
+    const paths = {
+      copy: 'M8 8h12v13H8z M16 5V3H3v13h2',
+      settings: 'M4 7h9m4 0h3M4 17h3m4 0h9 M13 4v6M7 14v6',
+      check: 'm5 12 4 4L19 6',
+      stop: 'M6 6h12v12H6z',
+      close: 'm6 6 12 12M18 6 6 18',
+      clock: 'M12 8v5l3 2 M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0',
+      text: 'M4 5h16M4 10h16M4 15h10M4 20h10',
+      download: 'M12 3v12m-4-4 4 4 4-4M4 18v3h16v-3',
+      warning: 'M12 3 2 21h20L12 3zM12 9v5M12 17v.5',
+    };
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    for (const [key, value] of Object.entries({viewBox:'0 0 24 24', fill:'none', stroke:'currentColor',
+      'stroke-width':'1.7', 'stroke-linecap':'round', 'stroke-linejoin':'round', 'aria-hidden':'true', focusable:'false'})) svg.setAttribute(key, value);
+    const path = document.createElementNS(svg.namespaceURI, 'path');
+    path.setAttribute('d', paths[name] || paths.copy);
+    svg.append(path);
+    return svg;
+  }
+
+  let closeOptions = null;
+  let noticeTimer = null;
+  function dismissNotice() {
+    clearTimeout(noticeTimer);
+    document.querySelector('.ytcopy-toast')?.remove();
+  }
+  function notify(message, persistent = false) {
+    dismissNotice();
+    const toast = element('div', 'ytcopy-toast');
+    const text = element('div', 'ytcopy-toast-text', message);
+    text.setAttribute('role', 'status');
+    text.setAttribute('aria-live', 'polite');
+    toast.append(text);
+    const close = button(toast, '', dismissNotice, 'ytcopy-toast-close');
+    close.setAttribute('aria-label', 'Cerrar aviso');
+    close.title = 'Cerrar aviso';
+    close.append(icon('close'));
+    document.body.append(toast);
+    if (!persistent) noticeTimer = setTimeout(dismissNotice, 4500);
+  }
+
   function mount(host, placement = 'panel') {
     const previous = controllers.get(host);
     if (previous?.bar.isConnected && previous.bar.parentElement === host) return;
     previous?.dispose();
     host.querySelector(`:scope > .${BAR}`)?.remove();
+    const compact = placement === 'actions';
     const bar = element('div', BAR);
     bar.dataset.placement = placement;
+    bar.dataset.state = 'idle';
     const label = element('div', 'ytcopy-label');
     label.append(element('span', '', 'Copiar transcripción'), element('span', 'ytcopy-version', `v${VERSION}`));
-    const actions = element('div', 'ytcopy-actions');
-    const idleMessage = placement === 'actions' ? '' : 'Copia el idioma mostrado en el panel.';
-    const status = element('div', 'ytcopy-status', idleMessage);
+    const actions = element('div', compact ? 'ytcopy-compact-controls' : 'ytcopy-actions');
+    const status = element('div', compact ? 'ytcopy-status ytcopy-sr-only' : 'ytcopy-status');
     status.setAttribute('role', 'status');
     status.setAttribute('aria-live', 'polite');
+    status.setAttribute('aria-atomic', 'true');
     const meter = element('progress', 'ytcopy-progress');
     meter.max = 1;
     meter.hidden = true;
     meter.setAttribute('aria-label', 'Recorrido del panel, no porcentaje de transcripción recuperada');
-    const plain = button(actions, placement === 'actions' ? 'Copiar transcripción' : 'Copiar texto', () => run('copy', false), 'ytcopy-primary');
-    const timed = button(actions, 'Con tiempos', () => run('copy', true));
-    const view = button(actions, 'Ver texto', () => run('preview', false));
-    const save = button(actions, 'TXT', () => run('download', false));
+    const plain = button(actions, compact ? '' : 'Copiar texto', () => run('copy', false), compact ? 'ytcopy-copy' : 'ytcopy-primary');
+    const glyph = element('span', 'ytcopy-copy-icon');
+    const copyLabel = element('span', 'ytcopy-copy-label', 'Copiar');
+    if (compact) {
+      plain.setAttribute('aria-label', 'Copiar transcripción');
+      glyph.append(icon('copy'));
+      plain.append(glyph, copyLabel);
+    }
     plain.title = `Copiar toda la transcripción sin tiempos · v${VERSION}`;
+
+    // A non-modal panel of real buttons, not a select/dropdown. It lives outside
+    // the action row so opening it cannot move YouTube's controls or be clipped.
+    const options = compact ? element('div', 'ytcopy-options') : null;
+    const extra = compact ? element('div', 'ytcopy-option-actions') : actions;
+    const timed = button(extra, 'Con tiempos', () => run('copy', true));
+    const view = button(extra, 'Ver texto', () => run('preview', false));
+    const save = button(extra, 'TXT', () => run('download', false));
+    timed.title = 'Copiar la transcripción con marcas de tiempo';
     view.title = 'Revisar el texto y elegir formato antes de copiar';
     save.title = 'Guardar la transcripción como archivo de texto';
-    const cancel = button(actions, 'Cancelar', () => active?.controller.abort(abortError('Lectura cancelada.')));
-    cancel.hidden = true;
-    bar.append(label, actions, meter, status);
-    if (placement === 'actions') {
+    const cancel = button(actions, compact ? '' : 'Cancelar', () => {
+      if (active?.task.host === host) active.controller.abort(abortError('Lectura cancelada.'));
+      else if (compact) toggleOptions();
+    }, compact ? 'ytcopy-options-toggle' : '');
+    if (compact) {
+      cancel.append(icon('settings'));
+      cancel.title = `Opciones de transcripción · v${VERSION}`;
+      cancel.setAttribute('aria-label', 'Opciones de transcripción');
+      cancel.setAttribute('aria-expanded', 'false');
+      cancel.setAttribute('aria-haspopup', 'dialog');
+      const id = `ytcopy-options-${++optionsSerial}`;
+      options.id = id;
+      cancel.setAttribute('aria-controls', id);
+      options.setAttribute('role', 'dialog');
+      options.setAttribute('aria-labelledby', `${id}-title`);
+      options.hidden = true;
+      // Top layer when supported; a positioned portal is the fallback.
+      if (typeof options.showPopover === 'function') options.setAttribute('popover', 'manual');
+      const heading = element('div', 'ytcopy-options-heading');
+      const title = element('h2', '', 'Transcripción');
+      title.id = `${id}-title`;
+      const close = button(heading, '', () => hideOptions(true), 'ytcopy-options-close');
+      close.setAttribute('aria-label', 'Cerrar opciones');
+      close.title = 'Cerrar opciones';
+      close.append(icon('close'));
+      heading.prepend(title);
+      const descriptions = [
+        [timed, 'clock', 'Copiar con tiempos', 'Un segmento por línea'],
+        [view, 'text', 'Ver texto', 'Revisar antes de copiar'],
+        [save, 'download', 'Guardar TXT', 'Archivo de texto'],
+      ];
+      for (const [btn, name, titleText, hint] of descriptions) {
+        btn.replaceChildren(icon(name));
+        const caption = element('span', 'ytcopy-option-caption');
+        caption.append(element('span', '', titleText), element('small', '', hint));
+        btn.append(caption);
+        // Retain stable accessible action names for existing integrations.
+        btn.setAttribute('aria-label', btn === timed ? 'Con tiempos' : btn === view ? 'Ver texto' : 'TXT');
+      }
+      const footer = element('div', 'ytcopy-options-footer');
+      footer.append(element('span', '', 'Idioma mostrado en YouTube'), element('span', 'ytcopy-version', `v${VERSION}`));
+      options.append(heading, extra, footer);
+      document.body.append(options);
+      bar.append(actions, meter, status);
       host.setAttribute('data-ytcopy-actions-host', '');
-      // Keep outside ytd-menu-renderer: YouTube manages/recycles its button lists.
       host.append(bar);
     } else {
+      cancel.hidden = true;
+      bar.append(label, actions, meter, status);
       const header = host.querySelector(':scope > #header');
       if (header) header.after(bar); else host.prepend(bar);
     }
     let disposed = false;
+    let optionsOpen = false;
+    let feedbackTimer = null;
+    let layoutFrame = null;
+    let resizeObserver = null;
+    let observedMenu = null;
+    let sampleButton = null;
+
+    function updateGlyph(name, text) {
+      if (!compact) return;
+      glyph.replaceChildren(icon(name));
+      copyLabel.textContent = text;
+    }
+    function report(message, kind = 'progress') {
+      if (disposed) return;
+      status.textContent = message;
+      if (!compact) return;
+      bar.dataset.state = kind;
+      if (kind === 'success') updateGlyph('check', 'Copiado');
+      else if (kind === 'download') updateGlyph('check', 'Guardado');
+      else if (kind === 'warning' || kind === 'error') updateGlyph('warning', 'Revisar');
+      else if (kind === 'progress') updateGlyph('copy', 'Leyendo');
+      else updateGlyph('copy', 'Copiar');
+      if (kind === 'error') notify(message, true);
+      else if (kind === 'info') notify(message);
+      clearTimeout(feedbackTimer);
+      if (kind !== 'progress') feedbackTimer = setTimeout(() => {
+        if (!disposed && active?.task.host !== host) { bar.dataset.state = 'idle'; updateGlyph('copy', 'Copiar'); }
+      }, kind === 'error' || kind === 'warning' ? 6000 : 2400);
+    }
+    function positionOptions() {
+      if (!optionsOpen || !options) return;
+      if (!bar.isConnected || !visible(bar)) { hideOptions(false); return; }
+      const rect = bar.getBoundingClientRect();
+      const viewport = window.visualViewport;
+      const leftEdge = viewport?.offsetLeft || 0;
+      const topEdge = viewport?.offsetTop || 0;
+      const width = viewport?.width || document.documentElement.clientWidth;
+      const height = viewport?.height || window.innerHeight;
+      const box = options.getBoundingClientRect();
+      const rightAligned = rect.right - box.width;
+      const x = Math.max(leftEdge + 8, Math.min(rightAligned, leftEdge + width - box.width - 8));
+      const below = rect.bottom + 8;
+      const y = below + box.height <= topEdge + height - 8 ? below : Math.max(topEdge + 8, rect.top - box.height - 8);
+      options.style.left = `${x}px`;
+      options.style.top = `${y}px`;
+    }
+    function onOutside(event) {
+      if (!options?.contains(event.target) && !bar.contains(event.target)) hideOptions(false);
+    }
+    function onOptionsKey(event) {
+      if (event.key !== 'Escape' || !optionsOpen) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      hideOptions(true);
+    }
+    function hideOptions(restoreFocus = false) {
+      if (!options || !optionsOpen) return;
+      optionsOpen = false;
+      if (options.hasAttribute('popover') && options.matches(':popover-open')) options.hidePopover();
+      options.hidden = true;
+      cancel.setAttribute('aria-expanded', 'false');
+      document.removeEventListener('pointerdown', onOutside, true);
+      document.removeEventListener('focusin', onOutside, true);
+      window.removeEventListener('keydown', onOptionsKey, true);
+      window.removeEventListener('scroll', positionOptions, true);
+      if (closeOptions === hideOptions) closeOptions = null;
+      if (restoreFocus && cancel.isConnected) cancel.focus({preventScroll: true});
+    }
+    function toggleOptions() {
+      if (!options || disposed) return;
+      if (optionsOpen) { hideOptions(true); return; }
+      closeOptions?.(false);
+      closeOptions = hideOptions;
+      optionsOpen = true;
+      options.hidden = false;
+      if (options.hasAttribute('popover')) options.showPopover();
+      cancel.setAttribute('aria-expanded', 'true');
+      positionOptions();
+      document.addEventListener('pointerdown', onOutside, true);
+      document.addEventListener('focusin', onOutside, true);
+      window.addEventListener('keydown', onOptionsKey, true);
+      window.addEventListener('scroll', positionOptions, true);
+      timed.focus({preventScroll: true});
+    }
+    function fit() {
+      layoutFrame = null;
+      if (!compact || disposed || !host.isConnected) return;
+      const menu = host.querySelector(':scope > #menu');
+      if (menu !== observedMenu) {
+        if (observedMenu) resizeObserver?.unobserve(observedMenu);
+        observedMenu = menu;
+        if (menu) resizeObserver?.observe(menu);
+        sampleButton = null;
+      }
+      sampleButton = sampleButton?.isConnected && visible(sampleButton) ? sampleButton :
+        [...(menu?.querySelectorAll('button') || [])].find(visible);
+      if (sampleButton) {
+        const size = sampleButton.getBoundingClientRect().height;
+        if (size >= 28 && size <= 60) bar.style.setProperty('--ytcopy-control-height', `${Math.round(size)}px`);
+      }
+      // Collapse only our label when there is not room. Never hide or replace a
+      // native action, and allow a natural wrap on genuinely narrow layouts.
+      const hostWidth = host.clientWidth;
+      const nativeWidth = menu?.getBoundingClientRect().width || 0;
+      const small = hostWidth - nativeWidth - 8 < 144;
+      const value = small ? 'true' : 'false';
+      if (bar.dataset.compact !== value) bar.dataset.compact = value;
+      positionOptions();
+    }
+    function scheduleFit() {
+      if (layoutFrame === null) layoutFrame = requestAnimationFrame(fit);
+    }
+    if (compact) {
+      if (typeof ResizeObserver === 'function') {
+        resizeObserver = new ResizeObserver(scheduleFit);
+        resizeObserver.observe(host);
+      }
+      window.addEventListener('resize', scheduleFit);
+      scheduleFit();
+    }
     function busy(value) {
       for (const btn of [plain, timed, view, save]) btn.disabled = value;
-      cancel.hidden = !value;
+      if (compact) {
+        cancel.setAttribute('aria-label', value ? 'Cancelar' : 'Opciones de transcripción');
+        cancel.title = value ? 'Cancelar lectura (Escape)' : `Opciones de transcripción · v${VERSION}`;
+        cancel.replaceChildren(icon(value ? 'stop' : 'settings'));
+        if (value) { clearTimeout(feedbackTimer); updateGlyph('copy', 'Leyendo'); }
+      } else cancel.hidden = !value;
       meter.hidden = !value;
       bar.setAttribute('aria-busy', String(value));
     }
     async function run(action, withTimes) {
       if (disposed) return;
-      if (active) { status.textContent = 'Ya hay una lectura en curso.'; return; }
-      const sourceFocus = document.activeElement;
-      const controller = new AbortController();
-      const task = {host, panel: null, signal: controller.signal, video: videoKey(), revision: navigationRevision,
+      const sourceFocus = compact ? plain : document.activeElement;
+      hideOptions(false);
+      if (active) { report('Ya hay una lectura en curso.', 'info'); return; }
+      dismissNotice();
+      const abortController = new AbortController();
+      const task = {host, panel: null, signal: abortController.signal, video: videoKey(), revision: navigationRevision,
         track: null, panelTarget: null, tabState: null, deadline: Date.now() + LIMITS.scan};
-      const operation = {controller, task};
+      const operation = {controller: abortController, task};
       active = operation;
       busy(true);
-      status.textContent = 'Buscando transcripción…';
+      report('Buscando transcripción…');
       let nextPreview = null;
       const onInput = event => {
-        if (!event.target.closest?.(OWN)) controller.abort(abortError('La búsqueda o el idioma ha cambiado.'));
+        if (!event.target.closest?.(OWN)) abortController.abort(abortError('La búsqueda o el idioma ha cambiado.'));
       };
       const onKey = event => {
-        if (event.key === 'Escape') { controller.abort(abortError('Lectura cancelada.')); event.preventDefault(); event.stopImmediatePropagation(); }
+        if (event.key === 'Escape') { abortController.abort(abortError('Lectura cancelada.')); event.preventDefault(); event.stopImmediatePropagation(); }
       };
       window.addEventListener('keydown', onKey, true);
       try {
-        const panel = await ensureTranscript(task, message => { status.textContent = message; }, placement === 'panel' ? host : null);
+        const panel = await ensureTranscript(task, message => report(message), compact ? null : host);
         task.panel = panel;
         task.track = trackKey(panel);
         task.panelTarget = panel.getAttribute('target-id');
@@ -759,30 +986,31 @@
         panel.addEventListener('input', onInput, true);
         panel.addEventListener('change', onInput, true);
         const result = await collect(task, info => {
-          status.textContent = `${info.phase} · ${info.count.toLocaleString()} segmentos recogidos…`;
+          report(`${info.phase} · ${info.count.toLocaleString()} segmentos recogidos…`);
           if (info.progress === null) meter.removeAttribute('value'); else meter.value = info.progress;
         });
         check(task, false);
         const text = format(result.segments, withTimes);
         if (result.warnings.length || action === 'preview') {
-          status.textContent = `${result.warnings.length ? 'Revisar: posible texto incompleto. ' : ''}${stats(result.segments, format(result.segments, false))}`;
+          report(`${result.warnings.length ? 'Revisar: posible texto incompleto. ' : ''}${stats(result.segments, format(result.segments, false))}`,
+            result.warnings.length ? 'warning' : 'preview');
           nextPreview = {result, withTimes};
         } else if (action === 'download') {
           download(text, withTimes);
-          status.textContent = `TXT preparado · ${stats(result.segments, format(result.segments, false))}`;
+          report(`TXT preparado · ${stats(result.segments, format(result.segments, false))}`, 'download');
         } else {
           try {
             await clipboard(text, () => check(task, false));
             check(task, false);
-            status.textContent = `Copiado · ${stats(result.segments, format(result.segments, false))}`;
+            report(`Copiado · ${stats(result.segments, format(result.segments, false))}`, 'success');
           } catch (error) {
             if (error.name === 'AbortError') throw error;
-            status.textContent = 'Texto recuperado; el portapapeles necesita tu intervención.';
+            report('Texto recuperado; no se pudo confirmar la copia al portapapeles.', 'warning');
             nextPreview = {result, withTimes, error: error.message};
           }
         }
       } catch (error) {
-        status.textContent = error.name === 'AbortError' ? error.message : `Error: ${error.message}`;
+        report(error.name === 'AbortError' ? error.message : `Error: ${error.message}`, error.name === 'AbortError' ? 'cancelled' : 'error');
       } finally {
         task.panel?.removeEventListener('input', onInput, true);
         task.panel?.removeEventListener('change', onInput, true);
@@ -793,11 +1021,22 @@
       }
     }
     const controller = {bar, placement,
-      reset: () => { if (!active || active.task.host !== host) status.textContent = idleMessage; },
+      reset: () => {
+        hideOptions(false);
+        clearTimeout(feedbackTimer);
+        if (!active || active.task.host !== host) { status.textContent = ''; bar.dataset.state = 'idle'; updateGlyph('copy', 'Copiar'); }
+        if (compact) scheduleFit();
+      },
       dispose: () => {
         disposed = true;
+        hideOptions(false);
+        clearTimeout(feedbackTimer);
+        if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
+        resizeObserver?.disconnect();
+        window.removeEventListener('resize', scheduleFit);
+        options?.remove();
         bar.remove();
-        if (placement === 'actions') host.removeAttribute('data-ytcopy-actions-host');
+        if (compact) host.removeAttribute('data-ytcopy-actions-host');
         if (active?.task.host === host) active.controller.abort(abortError('Los controles se han reconstruido.'));
       }};
     controllers.set(host, controller);
@@ -815,14 +1054,6 @@
       html[dark] .${BAR}, html[dark] .${DIALOG} { --ytcopy-bg:var(--yt-spec-base-background,#181818);
         --ytcopy-fg:var(--yt-spec-text-primary,#f1f1f1); --ytcopy-muted:var(--yt-spec-text-secondary,#aaa); }
       .${BAR} { display:block; flex:0 0 auto; min-width:0; padding:10px 14px 12px; background:var(--ytcopy-bg); border-bottom:1px solid var(--ytcopy-line); }
-      [data-ytcopy-actions-host] {display:flex!important;flex-wrap:wrap!important;gap:8px;align-items:center;min-width:0;max-width:100%;}
-      [data-ytcopy-actions-host] > #menu {max-width:100%;min-width:0;}
-      .${BAR}[data-placement="actions"] {display:flex;flex-wrap:wrap;align-items:center;gap:6px;flex:0 1 auto;
-        max-width:100%;padding:0;background:transparent;border:0;}
-      .${BAR}[data-placement="actions"] .ytcopy-label {order:2;margin:0;}
-      .${BAR}[data-placement="actions"] .ytcopy-label > span:first-child {display:none;}
-      .${BAR}[data-placement="actions"] .ytcopy-status, .${BAR}[data-placement="actions"] .ytcopy-progress {order:3;flex-basis:100%;margin-top:2px;}
-      .${BAR}[data-placement="actions"] .ytcopy-actions {min-width:0;max-width:100%;}
       .ytcopy-label {display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;font-weight:600;}
       .ytcopy-version {font-size:11px;color:var(--ytcopy-muted);font-weight:400;white-space:nowrap;}
       .ytcopy-actions {display:flex;flex-wrap:wrap;gap:6px;align-items:center;}
@@ -849,7 +1080,70 @@
       .ytcopy-count {font-size:12px;color:var(--ytcopy-muted);margin:0 0 8px;overflow-wrap:anywhere;}
       .ytcopy-preview-text {display:block;box-sizing:border-box;width:100%;height:clamp(140px,36dvh,360px);resize:vertical;
         padding:12px;margin:0 0 14px;border:1px solid var(--ytcopy-line);border-radius:10px;background:var(--ytcopy-bg);color:var(--ytcopy-fg);font:14px/1.6 Roboto,Arial,sans-serif;}
-      @media(max-width:420px) { .${DIALOG} {padding:14px;width:calc(100vw - 20px);} .${BAR} {padding-inline:10px;} }
+      /* The action row is a native-looking split button, not a second toolbar. */
+      [data-ytcopy-actions-host] {display:flex!important;flex-direction:row!important;flex-wrap:wrap!important;
+        column-gap:8px;row-gap:8px;align-items:center;justify-content:flex-end;min-width:0;max-width:100%;}
+      [data-ytcopy-actions-host] > #menu {flex:0 1 auto;max-width:100%;min-width:0;}
+      .ytcopy-transcript-bar[data-placement="actions"] {display:inline-flex;position:relative;flex:0 0 auto;
+        width:auto;max-width:100%;padding:0;background:none;border:0;gap:0;align-items:center;
+        --ytcopy-control-height:36px;}
+      .ytcopy-compact-controls {display:flex;align-items:stretch;height:var(--ytcopy-control-height);border-radius:999px;
+        background:var(--yt-spec-badge-chip-background,rgba(127,127,127,.18));box-shadow:inset 0 1px 0 rgba(127,127,127,.12);}
+      .ytcopy-transcript-bar .ytcopy-compact-controls button {display:inline-flex;align-items:center;justify-content:center;
+        box-sizing:border-box;min-height:0;height:100%;border:0;background:transparent;color:var(--ytcopy-fg);
+        font:500 14px/20px Roboto,Arial,sans-serif;white-space:nowrap;padding:0;transition:background-color .12s ease;}
+      .ytcopy-transcript-bar .ytcopy-compact-controls button:hover:not(:disabled) {filter:none;background:rgba(127,127,127,.16);}
+      .ytcopy-transcript-bar .ytcopy-copy {width:108px;gap:8px;border-radius:999px 0 0 999px;}
+      .ytcopy-transcript-bar .ytcopy-options-toggle {position:relative;width:32px;flex:none;border-radius:0 999px 999px 0;}
+      .ytcopy-options-toggle::before {content:"";position:absolute;inset-block:10px;inset-inline-start:0;
+        width:1px;background:var(--ytcopy-line);}
+      .ytcopy-transcript-bar[data-compact="true"] .ytcopy-copy {width:var(--ytcopy-control-height);min-width:36px;}
+      .ytcopy-transcript-bar[data-compact="true"] .ytcopy-copy-label {display:none;}
+      .ytcopy-copy-icon {display:flex;align-items:center;justify-content:center;width:20px;height:20px;flex:none;}
+      .ytcopy-copy-icon svg {width:20px;height:20px;}
+      .ytcopy-options-toggle svg {width:17px;height:17px;}
+      .ytcopy-transcript-bar[aria-busy="true"] .ytcopy-copy-icon {border:2px solid var(--ytcopy-line);
+        border-top-color:currentColor;border-radius:50%;box-sizing:border-box;animation:ytcopy-spin .9s linear infinite;}
+      .ytcopy-transcript-bar[aria-busy="true"] .ytcopy-copy-icon svg {display:none;}
+      .ytcopy-transcript-bar[data-placement="actions"] .ytcopy-progress {position:absolute;bottom:0;inset-inline:12px;
+        width:calc(100% - 24px);height:2px;margin:0;opacity:.65;pointer-events:none;}
+      .ytcopy-transcript-bar .ytcopy-sr-only {position:absolute!important;width:1px!important;height:1px!important;
+        padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;
+        clip-path:inset(50%)!important;white-space:nowrap!important;border:0!important;}
+      .ytcopy-options,.ytcopy-toast {--ytcopy-bg:var(--yt-spec-raised-background,#fff);--ytcopy-fg:var(--yt-spec-text-primary,#171717);
+        --ytcopy-muted:var(--yt-spec-text-secondary,#606060);--ytcopy-line:var(--yt-spec-10-percent-layer,rgba(127,127,127,.22));
+        box-sizing:border-box;color:var(--ytcopy-fg);font:14px/1.4 Roboto,Arial,sans-serif;text-align:start;}
+      html[dark] .ytcopy-options,html[dark] .ytcopy-toast {--ytcopy-bg:var(--yt-spec-raised-background,#282828);
+        --ytcopy-fg:var(--yt-spec-text-primary,#f1f1f1);--ytcopy-muted:var(--yt-spec-text-secondary,#aaa);}
+      .ytcopy-options {position:fixed;inset:auto;margin:0;width:min(286px,calc(100vw - 16px));max-height:calc(100dvh - 16px);
+        overflow:auto;z-index:2202;padding:8px;border:1px solid var(--ytcopy-line);border-radius:14px;
+        background:var(--ytcopy-bg);box-shadow:0 8px 28px #0003;}
+      .ytcopy-options[hidden],.ytcopy-toast[hidden] {display:none!important;}
+      .ytcopy-options-heading {display:flex;align-items:center;justify-content:space-between;padding:2px 4px 6px 10px;gap:8px;}
+      .ytcopy-options-heading h2 {margin:0;font:500 15px/22px Roboto,Arial,sans-serif;}
+      .ytcopy-options button,.ytcopy-toast button {appearance:none;border:0;cursor:pointer;color:inherit;background:transparent;
+        font:500 14px/20px Roboto,Arial,sans-serif;box-sizing:border-box;}
+      .ytcopy-option-actions {display:flex;flex-direction:column;gap:2px;}
+      .ytcopy-option-actions button {display:flex;align-items:center;gap:12px;width:100%;text-align:start;padding:10px;
+        border-radius:8px;min-height:54px;}
+      .ytcopy-option-actions button>svg {width:21px;height:21px;flex:none;}
+      .ytcopy-option-caption {display:flex;flex-direction:column;gap:2px;}
+      .ytcopy-option-caption small {font:400 12px/16px Roboto,Arial,sans-serif;color:var(--ytcopy-muted);}
+      .ytcopy-options button:hover:not(:disabled),.ytcopy-toast button:hover {background:rgba(127,127,127,.14);}
+      .ytcopy-options button:disabled {opacity:.5;cursor:progress;}
+      .ytcopy-options button:focus-visible,.ytcopy-toast button:focus-visible {outline:2px solid currentColor;outline-offset:-2px;}
+      .ytcopy-options .ytcopy-options-close,.ytcopy-toast .ytcopy-toast-close {display:flex;align-items:center;justify-content:center;
+        width:32px;height:32px;padding:7px;border-radius:50%;flex:none;}
+      .ytcopy-options-close svg,.ytcopy-toast-close svg {height:18px;width:18px;}
+      .ytcopy-options-footer {display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 10px 4px;
+        margin-top:6px;border-top:1px solid var(--ytcopy-line);color:var(--ytcopy-muted);font-size:11px;}
+      .ytcopy-toast {display:flex;align-items:center;gap:12px;position:fixed;bottom:20px;inset-inline-end:20px;z-index:2203;
+        width:max-content;max-width:min(430px,calc(100vw - 24px));border:1px solid var(--ytcopy-line);border-radius:12px;
+        background:var(--ytcopy-bg);padding:10px 10px 10px 16px;box-shadow:0 4px 20px #0003;}
+      .ytcopy-toast-text {overflow-wrap:anywhere;font-size:13px;}
+      @keyframes ytcopy-spin {to{transform:rotate(360deg);}}
+      @media(prefers-reduced-motion:reduce) {.ytcopy-copy-icon {animation:none!important;}.ytcopy-compact-controls button {transition:none!important;}}
+      @media(max-width:420px) { .${DIALOG} {padding:14px;width:calc(100vw - 20px);} .${BAR}[data-placement="panel"] {padding-inline:10px;} }
       @media(prefers-reduced-motion:reduce) { .${BAR} *, .${DIALOG} * {scroll-behavior:auto!important;} }
     `;
     (document.head || document.documentElement).append(style);
@@ -887,6 +1181,8 @@
   pageObserver.observe(document.documentElement, {childList: true, subtree: true, attributes: true,
     attributeFilter: ['target-id', 'visibility', 'aria-selected', 'hidden', 'video-id', 'id']});
   function navigate() {
+    closeOptions?.(false);
+    dismissNotice();
     navigationRevision++;
     active?.controller.abort(abortError('El vídeo ha cambiado.'));
     document.querySelector(`.${DIALOG}`)?.remove();
@@ -898,7 +1194,7 @@
   window.addEventListener('popstate', () => { navigate(); scheduleMount(); });
   window.addEventListener('pageshow', scheduleMount);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) scheduleMount(); });
-  window.addEventListener('pagehide', () => { active?.controller.abort(abortError('Se ha cerrado la página.')); });
+  window.addEventListener('pagehide', () => { closeOptions?.(false); dismissNotice(); active?.controller.abort(abortError('Se ha cerrado la página.')); });
   document.addEventListener('click', event => {
     if (!active || event.target.closest?.(OWN)) return;
     // Language choices may live in a popup outside the panel. Ordinary clicks on

@@ -6,7 +6,7 @@ Userscript para copiar, revisar y guardar la transcripción que YouTube proporci
 
 ## Instalación y actualización automática
 
-Con Tampermonkey instalado, abre el enlace de instalación y confirma la instalación o actualización. Después recarga YouTube. Los botones aparecen en la barra de acciones del vídeo, junto a Compartir/Descargar; pasan a otra fila cuando falta espacio.
+Con Tampermonkey instalado, abre el enlace de instalación y confirma la instalación o actualización. Después recarga YouTube. El control Copiar aparece junto a las acciones nativas del vídeo. Se reduce a un icono cuando falta espacio; en tamaños muy estrechos puede pasar a otra fila sin ocultar las acciones de YouTube.
 
 **Si usabas la versión 1.1.0 o anterior que se entregó como TXT, instala esta versión una vez desde el enlace de arriba.** Aquellas versiones no tenían configuradas las URL de este repositorio. Se conservan el nombre y el namespace del script; evita dejar dos copias activas.
 
@@ -16,7 +16,9 @@ Si el enlace se abre como texto, utiliza la opción de importar/instalar desde U
 
 ## Uso
 
-Pulsa **Copiar transcripción** en la barra de acciones del vídeo, sin necesidad de abrir el panel previamente. También están disponibles **Con tiempos**, **Ver texto** y **TXT**. Si el panel está cerrado, el script intenta abrirlo con los controles nativos disponibles (etiquetas españolas o inglesas), seleccionar la pestaña Transcripción y esperar los segmentos. Si no encuentra una transcripción disponible, lo indica sin copiar nada.
+Pulsa **Copiar** junto a las acciones del vídeo para copiar la transcripción sin tiempos. El pequeño botón de ajustes abre **Con tiempos**, **Ver texto** y **Guardar TXT**, sin mantener una segunda barra siempre visible. Cuando falta espacio se muestra solo el icono de copia. La versión se consulta en ese panel o al pasar el ratón por los controles. Durante la lectura, ajustes se convierte en **Cancelar**; también se admite Escape. Se conservan los controles dentro del panel lateral.
+
+No es necesario abrir el panel previamente. Si el panel está cerrado, el script intenta abrirlo con los controles nativos disponibles (etiquetas españolas o inglesas), seleccionar la pestaña Transcripción y esperar los segmentos. Si no encuentra una transcripción disponible, lo indica sin copiar nada.
 
 Los controles siguen apareciendo dentro del panel, incluido el combinado **En este vídeo**, aunque cambie o falte su identificador. Durante la apertura y la lectura puedes cancelar; también se admite Escape.
 
@@ -26,7 +28,7 @@ El script recorre el panel para recoger filas cargadas al desplazarse y consulta
 
 No utiliza servicios de transcripción externos, no incluye telemetría y no envía el texto a GitHub. GitHub sirve únicamente los archivos de distribución; el gestor realiza las comprobaciones de actualización. No se añaden permisos de ejecución nuevos para el auto-update.
 
-Está orientado al YouTube de escritorio, con el panel moderno y el clásico. No reconstruye texto ausente: un hueco puede ser silencio o contenido que YouTube no haya proporcionado. Los cambios en la interfaz de YouTube pueden requerir adaptar el script. Las comprobaciones validan la distribución, la sintaxis y 24 escenarios de interfaz en Chromium con HTML sintético. No equivalen a probar una sesión real de YouTube con Tampermonkey.
+Está orientado al YouTube de escritorio, con el panel moderno y el clásico. No reconstruye texto ausente: un hueco puede ser silencio o contenido que YouTube no haya proporcionado. Los cambios en la interfaz de YouTube pueden requerir adaptar el script. Las comprobaciones validan la distribución, la sintaxis y 54 escenarios de interfaz en Chromium con HTML sintético. No equivalen a probar una sesión real de YouTube con Tampermonkey.
 
 ## Mantener y publicar
 
@@ -34,12 +36,12 @@ Se necesita Node.js 22 o superior. Las pruebas de distribución no requieren dep
 
 ```sh
 # Tras cambiar el código, preparar una versión superior:
-npm run release -- 1.2.1
+npm run release -- 1.3.1
 npm test
 
 # Publicar los tres archivos juntos:
 git add youtube-copiar-transcripcion.user.js youtube-copiar-transcripcion.meta.js youtube-copiar-transcripcion.txt
-git commit -m "Release v1.2.1"
+git commit -m "Release v1.3.1"
 git push origin main
 ```
 
